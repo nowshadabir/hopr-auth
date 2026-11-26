@@ -1,0 +1,15 @@
+# Defense-in-depth: If the project root is ever placed inside webroot,
+# deny direct HTTP access to all internal directories and files.
+Options -Indexes
+
+<FilesMatch "^\.">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+</FilesMatch>
+
+<FilesMatch "\.(env|sql|log|md|json|lock|example|php)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+</FilesMatch>
