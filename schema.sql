@@ -13,6 +13,9 @@ CREATE TABLE IF NOT EXISTS `users` (
     `email_verified` TINYINT(1) NOT NULL DEFAULT 0,
     `subscription_status` ENUM('active', 'trial', 'expired', 'suspended') NOT NULL DEFAULT 'active',
     `subscription_expires_at` DATETIME NULL DEFAULT NULL,
+    `max_accounts` INT NULL DEFAULT NULL,
+    `modules` JSON NULL DEFAULT NULL,
+    `business_name` VARCHAR(160) NULL DEFAULT NULL,
     `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
     UNIQUE KEY `uq_users_email` (`email`)
@@ -58,4 +61,19 @@ CREATE TABLE IF NOT EXISTS `rate_limits` (
     PRIMARY KEY (`id`),
     UNIQUE KEY `uq_rate_limits_key` (`rate_key`),
     KEY `idx_rate_limits_window` (`window_start`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `invoices` (
+    `id` VARCHAR(64) NOT NULL,
+    `user_id` BIGINT UNSIGNED NOT NULL,
+    `invoice_no` VARCHAR(64) NOT NULL,
+    `data_json` LONGTEXT NOT NULL,
+    `updated_at_epoch` BIGINT UNSIGNED NOT NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `idx_invoices_user_updated` (`user_id`, `updated_at_epoch`),
+    CONSTRAINT `fk_invoices_user`
+        FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+        ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

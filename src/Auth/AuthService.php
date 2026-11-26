@@ -142,7 +142,7 @@ final class AuthService
         $nowStr = $now->format('Y-m-d H:i:s');
 
         $userStmt = $this->pdo->prepare(
-            'SELECT id, name, email, phone, subscription_status FROM users WHERE email = :email LIMIT 1'
+            'SELECT id, name, email, phone, subscription_status, max_accounts, modules FROM users WHERE email = :email LIMIT 1'
         );
         $userStmt->execute([':email' => $email]);
         $user = $userStmt->fetch();
@@ -310,7 +310,7 @@ final class AuthService
         }
 
         $stmt = $this->pdo->prepare(
-            'SELECT id, name, phone, email, password_hash, email_verified, subscription_status, subscription_expires_at
+            'SELECT id, name, phone, email, password_hash, email_verified, subscription_status, subscription_expires_at, max_accounts, modules
              FROM users
              WHERE email = :email
              LIMIT 1'
@@ -346,9 +346,11 @@ final class AuthService
     }
 
     /**
-     * GET /auth/me
+     * Authenticate a Bearer token and verify active subscription.
+     *
+     * @return array<string, mixed>|Response User row on success, or error Response on failure.
      */
-    public function me(?string $bearerToken): Response
+    public function authenticate(?string $bearerToken): array|Response
     {
         if ($bearerToken === null) {
             return Response::error(401, 'UNAUTHORIZED', 'Missing or invalid authorization token.');
@@ -359,7 +361,8 @@ final class AuthService
         $tokenHash = hash('sha256', $bearerToken);
 
         $stmt = $this->pdo->prepare(
-            'SELECT u.id, u.name, u.email, u.phone, u.email_verified, u.subscription_status, u.subscription_expires_at
+            'SELECT u.id, u.name, u.email, u.phone, u.email_verified, u.subscription_status, u.subscription_expires_at,
+                    u.max_accounts, u.modules, u.business_name
              FROM user_sessions s
              INNER JOIN users u ON u.id = s.user_id
              WHERE s.token_hash = :token_hash
@@ -379,6 +382,19 @@ final class AuthService
 
         if (!$this->isSubscriptionActive($user, $now)) {
             return Response::error(403, 'SUBSCRIPTION_REQUIRED', 'Active subscription required.');
+        }
+
+        return $user;
+    }
+
+    /**
+     * GET /auth/me
+     */
+    public function me(?string $bearerToken): Response
+    {
+        $user = $this->authenticate($bearerToken);
+        if ($user instanceof Response) {
+            return $user;
         }
 
         return Response::json(200, [
@@ -528,17 +544,40 @@ final class AuthService
     }
 
     /**
+     * Parse modules JSON column, defaulting to ["whatsapp"] when NULL or invalid.
+     *
+     * @return string[]
+     */
+    public static function parseModules(mixed $raw): array
+    {
+        if (is_string($raw) && $raw !== '') {
+            $decoded = json_decode($raw, true);
+            if (is_array($decoded)) {
+                return array_values(array_map('strval', $decoded));
+            }
+        } elseif (is_array($raw)) {
+            return array_values(array_map('strval', $raw));
+        }
+
+        return ['whatsapp'];
+    }
+
+    /**
      * @param array<string, mixed> $user
      * @return array<string, mixed>
      */
     private function formatUser(array $user): array
     {
+        $maxAccounts = $user['max_accounts'] ?? null;
+
         return [
             'id' => (int) $user['id'],
             'name' => (string) $user['name'],
             'email' => (string) $user['email'],
             'phone' => (string) $user['phone'],
             'subscription_status' => (string) $user['subscription_status'],
+            'max_accounts' => $maxAccounts !== null ? (int) $maxAccounts : null,
+            'modules' => self::parseModules($user['modules'] ?? null),
         ];
     }
 

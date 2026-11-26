@@ -8,6 +8,7 @@ use Hopr\Auth\Config;
 use Hopr\Auth\Database;
 use Hopr\Auth\Http\Request;
 use Hopr\Auth\Http\Response;
+use Hopr\Auth\Invoice\InvoiceService;
 use Hopr\Auth\Mail\SmtpMailer;
 use Hopr\Auth\Security\RateLimiter;
 
@@ -30,8 +31,9 @@ try {
         $rateLimiter,
         (string) $config->get('app.pepper'),
     );
+    $invoiceService = new InvoiceService($pdo, $authService);
 
-    $app = new App($authService);
+    $app = new App($authService, $invoiceService);
     $response = $app->handle($request);
     $response->send();
 } catch (\InvalidArgumentException $e) {

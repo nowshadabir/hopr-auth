@@ -10,6 +10,7 @@ use Hopr\Auth\App;
 use Hopr\Auth\Auth\AuthService;
 use Hopr\Auth\Config;
 use Hopr\Auth\Http\Request;
+use Hopr\Auth\Invoice\InvoiceService;
 use Hopr\Auth\Mail\MailerInterface;
 use Hopr\Auth\Security\RateLimiter;
 use PDO;
@@ -63,6 +64,9 @@ final class AuthApiTest extends TestCase
                 email_verified INTEGER NOT NULL DEFAULT 0,
                 subscription_status TEXT NOT NULL DEFAULT "active",
                 subscription_expires_at TEXT NULL,
+                max_accounts INTEGER NULL DEFAULT NULL,
+                modules TEXT NULL DEFAULT NULL,
+                business_name TEXT NULL DEFAULT NULL,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE email_otps (
@@ -89,6 +93,15 @@ final class AuthApiTest extends TestCase
                 hits INTEGER NOT NULL DEFAULT 0,
                 window_start TEXT NOT NULL
             );
+            CREATE TABLE invoices (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                invoice_no TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                updated_at_epoch INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
         ');
 
         $this->mailer = new FakeMailer();
@@ -97,14 +110,16 @@ final class AuthApiTest extends TestCase
 
     private function makeApp(?DateTimeImmutable $now = null): App
     {
+        $fixedNow = $now ?? new DateTimeImmutable('2026-11-27 00:00:00', new DateTimeZone('UTC'));
         $service = new AuthService(
             $this->pdo,
             $this->mailer,
             $this->rateLimiter,
             self::PEPPER,
-            $now ?? new DateTimeImmutable('2026-11-27 00:00:00', new DateTimeZone('UTC')),
+            $fixedNow,
         );
-        return new App($service);
+        $invoices = new InvoiceService($this->pdo, $service, $fixedNow);
+        return new App($service, $invoices);
     }
 
     /**
@@ -372,5 +387,151 @@ final class AuthApiTest extends TestCase
     {
         $this->expectException(\RuntimeException::class);
         Config::load(dirname(__DIR__));
+    }
+
+    public function testModulesMaxAccountsAndInvoiceSyncEndpoints(): void
+    {
+        $t0 = new DateTimeImmutable('2026-11-27 00:00:00', new DateTimeZone('UTC'));
+        $app = $this->makeApp($t0);
+
+        // Create User A (default modules = NULL -> ["whatsapp"], max_accounts = NULL)
+        $app->handle($this->req('POST', '/auth/signup', [
+            'name' => 'Alice',
+            'phone' => '+15550100',
+            'email' => 'alice-inv@example.com',
+            'password' => 'Password123!',
+        ]));
+        $otpA = $this->mailer->lastOtp();
+        $verifyA = $app->handle($this->req('POST', '/auth/verify-otp', [
+            'email' => 'alice-inv@example.com',
+            'otp' => $otpA,
+            'device_name' => 'Mac',
+        ]));
+        $this->assertSame(200, $verifyA->status);
+        $this->assertNull($verifyA->data['user']['max_accounts']);
+        $this->assertSame(['whatsapp'], $verifyA->data['user']['modules']);
+        $tokenA = $verifyA->data['token'];
+
+        // Module locked by default -> 403 MODULE_LOCKED
+        $locked = $app->handle($this->req('GET', '/invoices', [], [
+            'authorization' => 'Bearer ' . $tokenA,
+        ]));
+        $this->assertSame(403, $locked->status);
+        $this->assertSame('MODULE_LOCKED', $locked->data['code']);
+
+        // Enable invoices module and set max_accounts = 5 for User A
+        $this->pdo->exec("UPDATE users SET max_accounts = 5, modules = '[\"whatsapp\", \"invoices\"]' WHERE email = 'alice-inv@example.com'");
+
+        $meA = $app->handle($this->req('GET', '/auth/me', [], [
+            'authorization' => 'Bearer ' . $tokenA,
+        ]));
+        $this->assertSame(200, $meA->status);
+        $this->assertSame(5, $meA->data['user']['max_accounts']);
+        $this->assertSame(['whatsapp', 'invoices'], $meA->data['user']['modules']);
+
+        // POST /invoices (strips logo_data_url, updates business_name)
+        $post1 = $app->handle($this->req('POST', '/invoices', [
+            'business_name' => 'Hopr Studio LLC',
+            'invoice' => [
+                'id' => 'inv_001',
+                'invoice_no' => 'INV-2026-001',
+                'total' => 250.00,
+                'updated_at_epoch' => 1000,
+                'logo_data_url' => 'data:image/png;base64,SHOULD_BE_STRIPPED',
+            ],
+        ], ['authorization' => 'Bearer ' . $tokenA]));
+        $this->assertSame(200, $post1->status);
+        $this->assertTrue($post1->data['ok']);
+        $this->assertSame('inv_001', $post1->data['id']);
+
+        // Verify logo_data_url was NOT stored in DB
+        $rawJson = $this->pdo->query("SELECT data_json FROM invoices WHERE id = 'inv_001'")->fetchColumn();
+        $this->assertIsString($rawJson);
+        $this->assertStringNotContainsString('logo_data_url', $rawJson);
+        $this->assertStringNotContainsString('SHOULD_BE_STRIPPED', $rawJson);
+
+        // POST second invoice with newer updated_at_epoch
+        $post2 = $app->handle($this->req('POST', '/invoices', [
+            'business_name' => '',
+            'invoice' => [
+                'id' => 'inv_002',
+                'invoice_no' => 'INV-2026-002',
+                'total' => 500.00,
+                'updated_at_epoch' => 2000,
+            ],
+        ], ['authorization' => 'Bearer ' . $tokenA]));
+        $this->assertSame(200, $post2->status);
+
+        // Upsert inv_001 with updated total
+        $upsert1 = $app->handle($this->req('POST', '/invoices', [
+            'invoice' => [
+                'id' => 'inv_001',
+                'invoice_no' => 'INV-2026-001',
+                'total' => 300.00,
+                'updated_at_epoch' => 1500,
+            ],
+        ], ['authorization' => 'Bearer ' . $tokenA]));
+        $this->assertSame(200, $upsert1->status);
+
+        // GET /invoices -> ordered by updated_at_epoch DESC (inv_002 then inv_001)
+        $listA = $app->handle($this->req('GET', '/invoices', [], [
+            'authorization' => 'Bearer ' . $tokenA,
+        ]));
+        $this->assertSame(200, $listA->status);
+        $this->assertSame('Hopr Studio LLC', $listA->data['business_name']);
+        $this->assertCount(2, $listA->data['invoices']);
+        $this->assertSame('inv_002', $listA->data['invoices'][0]['id']);
+        $this->assertSame('inv_001', $listA->data['invoices'][1]['id']);
+        $this->assertSame(300, $listA->data['invoices'][1]['total']);
+
+        // Create User B with "invoice" singular module
+        $app->handle($this->req('POST', '/auth/signup', [
+            'name' => 'Bob',
+            'phone' => '+15550200',
+            'email' => 'bob-inv@example.com',
+            'password' => 'Password123!',
+        ]));
+        $otpB = $this->mailer->lastOtp();
+        $verifyB = $app->handle($this->req('POST', '/auth/verify-otp', [
+            'email' => 'bob-inv@example.com',
+            'otp' => $otpB,
+            'device_name' => 'Win',
+        ]));
+        $tokenB = $verifyB->data['token'];
+        $this->pdo->exec("UPDATE users SET modules = '[\"invoice\"]' WHERE email = 'bob-inv@example.com'");
+
+        // User B cannot overwrite User A's inv_001 -> 403 FORBIDDEN
+        $hijack = $app->handle($this->req('POST', '/invoices', [
+            'invoice' => [
+                'id' => 'inv_001',
+                'invoice_no' => 'HIJACK',
+                'total' => 1,
+            ],
+        ], ['authorization' => 'Bearer ' . $tokenB]));
+        $this->assertSame(403, $hijack->status);
+        $this->assertSame('FORBIDDEN', $hijack->data['code']);
+
+        // User B cannot delete User A's inv_001
+        $delB = $app->handle($this->req('DELETE', '/invoices/inv_001', [], [
+            'authorization' => 'Bearer ' . $tokenB,
+        ]));
+        $this->assertSame(200, $delB->status);
+
+        $stillThere = $app->handle($this->req('GET', '/invoices', [], [
+            'authorization' => 'Bearer ' . $tokenA,
+        ]));
+        $this->assertCount(2, $stillThere->data['invoices']);
+
+        // User A deletes inv_001
+        $delA = $app->handle($this->req('DELETE', '/invoices/inv_001', [], [
+            'authorization' => 'Bearer ' . $tokenA,
+        ]));
+        $this->assertSame(200, $delA->status);
+
+        $afterDelA = $app->handle($this->req('GET', '/invoices', [], [
+            'authorization' => 'Bearer ' . $tokenA,
+        ]));
+        $this->assertCount(1, $afterDelA->data['invoices']);
+        $this->assertSame('inv_002', $afterDelA->data['invoices'][0]['id']);
     }
 }
