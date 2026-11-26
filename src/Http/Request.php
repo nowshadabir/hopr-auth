@@ -13,6 +13,8 @@ final class Request
     /**
      * @param array<string, mixed> $body
      * @param array<string, string> $headers
+     * @param array<string, mixed> $query
+     * @param array<string, string> $cookies
      */
     public function __construct(
         public readonly string $method,
@@ -20,6 +22,8 @@ final class Request
         public readonly array $body,
         public readonly array $headers,
         public readonly string $clientIp,
+        public readonly array $query = [],
+        public readonly array $cookies = [],
     ) {
     }
 
@@ -46,22 +50,37 @@ final class Request
         $body = [];
 
         if (in_array($method, ['POST', 'PUT', 'PATCH'], true)) {
-            $rawBody = file_get_contents('php://input', false, null, 0, self::MAX_BODY_BYTES + 1);
-            if ($rawBody !== false && $rawBody !== '') {
-                if (strlen($rawBody) > self::MAX_BODY_BYTES) {
-                    throw new InvalidArgumentException('Request body too large.');
+            $contentType = strtolower($headers['content-type'] ?? '');
+            $isAdminForm = ($path === '/admin' || str_starts_with($path, '/admin/'))
+                && (str_contains($contentType, 'application/x-www-form-urlencoded') || str_contains($contentType, 'multipart/form-data'));
+
+            if ($isAdminForm) {
+                $body = $_POST;
+            } else {
+                $rawBody = file_get_contents('php://input', false, null, 0, self::MAX_BODY_BYTES + 1);
+                if ($rawBody !== false && $rawBody !== '') {
+                    if (strlen($rawBody) > self::MAX_BODY_BYTES) {
+                        throw new InvalidArgumentException('Request body too large.');
+                    }
+                    $decoded = json_decode($rawBody, true);
+                    if (!is_array($decoded)) {
+                        throw new InvalidArgumentException('Invalid JSON payload.');
+                    }
+                    $body = $decoded;
                 }
-                $decoded = json_decode($rawBody, true);
-                if (!is_array($decoded)) {
-                    throw new InvalidArgumentException('Invalid JSON payload.');
-                }
-                $body = $decoded;
             }
         }
 
         $clientIp = self::resolveClientIp($trustedProxies);
 
-        return new self($method, $path, $body, $headers, $clientIp);
+        $cookies = [];
+        foreach ($_COOKIE as $k => $v) {
+            if (is_string($k) && is_string($v)) {
+                $cookies[$k] = $v;
+            }
+        }
+
+        return new self($method, $path, $body, $headers, $clientIp, $_GET, $cookies);
     }
 
     public function getBearerToken(): ?string

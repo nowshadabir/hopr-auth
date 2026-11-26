@@ -64,6 +64,11 @@ final class Config
             'security' => [
                 'trusted_proxies' => $trustedProxies,
             ],
+            'admin' => [
+                'username' => (string) ($env['ADMIN_USERNAME'] ?? ($phpConfig['admin']['username'] ?? 'admin')),
+                'password_hash' => (string) ($env['ADMIN_PASSWORD_HASH'] ?? ($phpConfig['admin']['password_hash'] ?? '')),
+                'password' => (string) ($env['ADMIN_PASSWORD'] ?? ($phpConfig['admin']['password'] ?? '')),
+            ],
         ]);
     }
 

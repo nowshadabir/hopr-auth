@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Hopr\Auth\Admin\AdminController;
 use Hopr\Auth\App;
 use Hopr\Auth\Auth\AuthService;
 use Hopr\Auth\Config;
@@ -32,8 +33,9 @@ try {
         (string) $config->get('app.pepper'),
     );
     $invoiceService = new InvoiceService($pdo, $authService);
+    $adminController = new AdminController($pdo, $config, $rateLimiter);
 
-    $app = new App($authService, $invoiceService);
+    $app = new App($authService, $invoiceService, $adminController);
     $response = $app->handle($request);
     $response->send();
 } catch (\InvalidArgumentException $e) {

@@ -6,6 +6,7 @@ namespace Hopr\Auth\Tests;
 
 use DateTimeImmutable;
 use DateTimeZone;
+use Hopr\Auth\Admin\AdminController;
 use Hopr\Auth\App;
 use Hopr\Auth\Auth\AuthService;
 use Hopr\Auth\Config;
@@ -533,5 +534,112 @@ final class AuthApiTest extends TestCase
         ]));
         $this->assertCount(1, $afterDelA->data['invoices']);
         $this->assertSame('inv_002', $afterDelA->data['invoices'][0]['id']);
+    }
+
+    public function testAdminPanelLoginUpdateAndRevokeSessions(): void
+    {
+        $t0 = new DateTimeImmutable('2026-11-27 00:00:00', new DateTimeZone('UTC'));
+        $authService = new AuthService($this->pdo, $this->mailer, $this->rateLimiter, self::PEPPER, $t0);
+        $invoiceService = new InvoiceService($this->pdo, $authService, $t0);
+
+        // 1. Unconfigured admin -> 503
+        $unconfConfig = Config::fromArray([
+            'app' => ['env' => 'testing', 'pepper' => self::PEPPER],
+            'admin' => ['username' => 'admin', 'password_hash' => '', 'password' => ''],
+        ]);
+        $unconfApp = new App($authService, $invoiceService, new AdminController($this->pdo, $unconfConfig, $this->rateLimiter, $t0));
+        $res503 = $unconfApp->handle($this->req('GET', '/admin'));
+        $this->assertSame(503, $res503->status);
+
+        // 2. Configured admin
+        $adminHash = password_hash('AdminSecret99!', PASSWORD_BCRYPT);
+        $config = Config::fromArray([
+            'app' => ['env' => 'testing', 'pepper' => self::PEPPER],
+            'admin' => ['username' => 'admin', 'password_hash' => $adminHash, 'password' => ''],
+        ]);
+        $admin = new AdminController($this->pdo, $config, $this->rateLimiter, $t0);
+        $app = new App($authService, $invoiceService, $admin);
+
+        // Create a user with an active session
+        $app->handle($this->req('POST', '/auth/signup', [
+            'name' => 'Dave',
+            'phone' => '+15550300',
+            'email' => 'dave@example.com',
+            'password' => 'Password123!',
+        ]));
+        $otp = $this->mailer->lastOtp();
+        $verify = $app->handle($this->req('POST', '/auth/verify-otp', [
+            'email' => 'dave@example.com',
+            'otp' => $otp,
+            'device_name' => 'Mac',
+        ]));
+        $userToken = $verify->data['token'];
+        $userId = (string) $verify->data['user']['id'];
+
+        // Bad admin login -> 401
+        $badLogin = $app->handle($this->req('POST', '/admin/login', [
+            'username' => 'admin',
+            'password' => 'WrongPass',
+        ]));
+        $this->assertSame(401, $badLogin->status);
+
+        // Valid admin login -> 302 + Set-Cookie
+        $goodLogin = $app->handle($this->req('POST', '/admin/login', [
+            'username' => 'admin',
+            'password' => 'AdminSecret99!',
+        ]));
+        $this->assertSame(302, $goodLogin->status);
+        $setCookie = $goodLogin->headers['Set-Cookie'] ?? '';
+        $this->assertStringContainsString('hopr_admin_session=', $setCookie);
+        preg_match('/hopr_admin_session=([^;]+)/', $setCookie, $cookieMatch);
+        $cookieVal = $cookieMatch[1] ?? '';
+        $this->assertNotSame('', $cookieVal);
+
+        // Load dashboard & extract CSRF token
+        $dash = $app->handle(new Request('GET', '/admin', [], [], '203.0.113.10', [], ['hopr_admin_session' => $cookieVal]));
+        $this->assertSame(200, $dash->status);
+        $this->assertStringContainsString('dave@example.com', (string) $dash->rawBody);
+        preg_match('/name="_csrf" value="([a-f0-9]+)"/', (string) $dash->rawBody, $csrfMatch);
+        $csrf = $csrfMatch[1] ?? '';
+        $this->assertNotSame('', $csrf);
+
+        // Update user without CSRF -> 403
+        $noCsrf = $app->handle(new Request('POST', '/admin/users/update', [
+            'user_id' => $userId,
+            'subscription_status' => 'trial',
+        ], [], '203.0.113.10', [], ['hopr_admin_session' => $cookieVal]));
+        $this->assertSame(403, $noCsrf->status);
+
+        // Update user with valid CSRF -> 302 and DB updated
+        $upd = $app->handle(new Request('POST', '/admin/users/update', [
+            '_csrf' => $csrf,
+            'user_id' => $userId,
+            'subscription_status' => 'trial',
+            'subscription_expires_at' => '2026-12-31',
+            'max_accounts' => '3',
+            'modules' => ['whatsapp', 'invoices'],
+            'email_verified' => '1',
+        ], [], '203.0.113.10', [], ['hopr_admin_session' => $cookieVal]));
+        $this->assertSame(302, $upd->status);
+
+        $meAfter = $app->handle($this->req('GET', '/auth/me', [], [
+            'authorization' => 'Bearer ' . $userToken,
+        ]));
+        $this->assertSame(200, $meAfter->status);
+        $this->assertSame('trial', $meAfter->data['user']['subscription_status']);
+        $this->assertSame(3, $meAfter->data['user']['max_accounts']);
+        $this->assertSame(['whatsapp', 'invoices'], $meAfter->data['user']['modules']);
+
+        // Revoke all sessions for Dave -> /auth/me returns 401
+        $revoke = $app->handle(new Request('POST', '/admin/users/revoke-sessions', [
+            '_csrf' => $csrf,
+            'user_id' => $userId,
+        ], [], '203.0.113.10', [], ['hopr_admin_session' => $cookieVal]));
+        $this->assertSame(302, $revoke->status);
+
+        $meRevoked = $app->handle($this->req('GET', '/auth/me', [], [
+            'authorization' => 'Bearer ' . $userToken,
+        ]));
+        $this->assertSame(401, $meRevoked->status);
     }
 }

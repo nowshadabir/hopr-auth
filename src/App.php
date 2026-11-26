@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Hopr\Auth;
 
+use Hopr\Auth\Admin\AdminController;
 use Hopr\Auth\Auth\AuthService;
 use Hopr\Auth\Http\Request;
 use Hopr\Auth\Http\Response;
@@ -14,6 +15,7 @@ final class App
     public function __construct(
         private readonly AuthService $auth,
         private readonly InvoiceService $invoices,
+        private readonly ?AdminController $admin = null,
     ) {
     }
 
@@ -24,6 +26,10 @@ final class App
 
         if ($method === 'OPTIONS') {
             return new Response(204, []);
+        }
+
+        if ($this->admin !== null && ($path === '/admin' || str_starts_with($path, '/admin/'))) {
+            return $this->admin->handle($request);
         }
 
         if ($method === 'DELETE' && preg_match('#^/invoices/([^/]+)$#', $path, $matches) === 1) {

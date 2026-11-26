@@ -33,4 +33,9 @@ return [
     'security' => [
         'trusted_proxies' => [],
     ],
+    'admin' => [
+        'username' => 'admin',
+        'password_hash' => '',
+        'password' => '',
+    ],
 ];
