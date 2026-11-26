@@ -51,11 +51,20 @@ final class Request
 
         if (in_array($method, ['POST', 'PUT', 'PATCH'], true)) {
             $contentType = strtolower($headers['content-type'] ?? '');
-            $isAdminForm = ($path === '/admin' || str_starts_with($path, '/admin/'))
-                && (str_contains($contentType, 'application/x-www-form-urlencoded') || str_contains($contentType, 'multipart/form-data'));
+            $isAdminPath = $path === '/admin' || str_starts_with($path, '/admin/');
 
-            if ($isAdminForm) {
-                $body = $_POST;
+            if ($isAdminPath && !str_contains($contentType, 'application/json')) {
+                if ($_POST !== []) {
+                    $body = $_POST;
+                } else {
+                    $rawBody = file_get_contents('php://input', false, null, 0, self::MAX_BODY_BYTES + 1);
+                    if ($rawBody !== false && $rawBody !== '') {
+                        if (strlen($rawBody) > self::MAX_BODY_BYTES) {
+                            throw new InvalidArgumentException('Request body too large.');
+                        }
+                        parse_str($rawBody, $body);
+                    }
+                }
             } else {
                 $rawBody = file_get_contents('php://input', false, null, 0, self::MAX_BODY_BYTES + 1);
                 if ($rawBody !== false && $rawBody !== '') {
@@ -112,6 +121,10 @@ final class Request
                 $name = strtolower(str_replace('_', '-', substr($key, 5)));
                 $headers[$name] = $value;
             }
+        }
+
+        if (!isset($headers['content-type']) && is_string($_SERVER['CONTENT_TYPE'] ?? null)) {
+            $headers['content-type'] = $_SERVER['CONTENT_TYPE'];
         }
 
         if (!isset($headers['authorization'])) {
